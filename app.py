@@ -18,6 +18,11 @@ LAGS = [1, 2, 3, 6, 12]
 ROLLING_WINDOWS = [3, 6, 12]
 EPS = 1e-6
 
+ENABLE_ENERGY_GWP_SCENARIO_RULE = True
+MAX_GWP_REDUCTION_FROM_RENEWABLE_SHARE = 0.08
+MAX_GWP_REDUCTION_FROM_ENERGY_RECOVERY = 0.06
+MAX_TOTAL_GWP_SCENARIO_REDUCTION = 0.12
+
 COMPOSITION_COLS = [
     'NMC_share_%',
     'LFP_share_%',
@@ -140,7 +145,7 @@ FRIENDLY_NAMES = {
     'Renewable_share_%': 'Renewable energy share',
     'Overall_recovery_rate_%': 'Battery energy recovery rate',
     'Electricity_total_kWh_t': 'Total electricity demand',
-    'Recovered_energy_kWh_t': 'Recovered battery energy used internally',
+    'Recovered_energy_kWh_t': 'Recovered battery energy reused internally',
     'External_electricity_kWh_t': 'Grid Energy Consumption',
     'Renewable_external_kWh_t': 'Renewable external electricity',
     'Nonrenewable_external_kWh_t': 'Non-renewable external electricity',
@@ -148,7 +153,7 @@ FRIENDLY_NAMES = {
     'Water_L_t': 'Operational water consumption',
     'Transport_km': 'Transport distance',
     'Black_mass_kg_t': 'Black mass production',
-    'GWP_service_kgCO2e_tBattery': 'Climate impact per tonne of battery',
+    'GWP_service_kgCO2e_tBattery': 'Climate change impact per tonne of battery',
     'Water_use_m3_tBattery': 'Water use per tonne of battery',
     'GWP_kgCO2e_kgBM': 'Climate impact per kg of black mass',
     'Black_mass_purity_%': 'Black mass purity',
@@ -373,6 +378,38 @@ def predict_one_step_hybrid(model_pack, row_dict, target):
     X_future = pd.DataFrame([row_dict])[feature_cols]
     pred = predict_hybrid(model_pack, X_future)[0]
     return clip_logical_bounds(target, pred)
+
+
+def apply_energy_gwp_scenario_rule(row, scenario_config, scenario_factor):
+    if not ENABLE_ENERGY_GWP_SCENARIO_RULE or scenario_config is None:
+        return row
+
+    if 'GWP_service_kgCO2e_tBattery' not in row:
+        return row
+
+    renewable_gain_pp = max(
+        0.0,
+        float(scenario_config.get('Renewable_share_%_delta', 0.0)) * scenario_factor
+    )
+    recovery_gain_pp = max(
+        0.0,
+        float(scenario_config.get('Overall_recovery_rate_%_delta', 0.0)) * scenario_factor
+    )
+
+    renewable_reduction = renewable_gain_pp / 100 * MAX_GWP_REDUCTION_FROM_RENEWABLE_SHARE
+    recovery_reduction = recovery_gain_pp / 100 * MAX_GWP_REDUCTION_FROM_ENERGY_RECOVERY
+    total_reduction = min(
+        MAX_TOTAL_GWP_SCENARIO_REDUCTION,
+        renewable_reduction + recovery_reduction
+    )
+
+    if total_reduction > 0:
+        row['GWP_service_kgCO2e_tBattery'] = max(
+            0.0,
+            float(row['GWP_service_kgCO2e_tBattery']) * (1 - total_reduction)
+        )
+
+    return row
 
 
 def alr_col(numerator, reference):
@@ -758,6 +795,7 @@ def forecast_engine(result, scenario_config=None):
             feature_row = row.copy()
             feature_row.update(make_future_lag_features(history_df, target))
             row[target] = predict_one_step_hybrid(models[target], feature_row, target)
+        row = apply_energy_gwp_scenario_rule(row, scenario_config, scenario_factor)
         future_rows.append(row)
         history_df = pd.concat([history_df, pd.DataFrame([row])], ignore_index=True)
     future_df = pd.DataFrame(future_rows)
@@ -838,7 +876,7 @@ def show_normalized_scenario_metrics(quantity_label, quantity, gwp_label, gwp_va
         <div class="scenario-kpi-card scenario-kpi-card-recovered">
             <div class="scenario-kpi-label">Recovered energy</div>
             <div class="scenario-kpi-value">{format_compact(energy['Recovered_energy_kWh_t'], 'kWh')}</div>
-            <div class="scenario-kpi-note">used internally</div>
+            <div class="scenario-kpi-note">reused internally</div>
         </div>
         <div class="scenario-grid-energy-card">
             <div class="scenario-grid-energy-main">
@@ -1991,4 +2029,3 @@ with tab_export:
         file_name='battery_lca_forecast_dashboard_results.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
-
